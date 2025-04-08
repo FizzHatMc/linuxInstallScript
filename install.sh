@@ -52,7 +52,7 @@ fi
 
 # Pakete installieren
 echo "Installiere gewünschte Programme..."
-yay -S --noconfirm protonpass-bin prismlauncher prusa-slicer discord steam protonvpn-gui firefox solaar
+yay -S --noconfirm protonpass-bin prismlauncher prusa-slicer discord steam protonvpn-gui firefox intellij-idea-ultimate-edition solaar
 pacman -S --noconfirm ntfs-3g
 
 # Sicherstellen, dass Wayland genutzt wird
@@ -67,6 +67,22 @@ echo "Lade neueste OrcaSlicer-Version herunter..."
 LATEST_RELEASE=$(curl -s https://api.github.com/repos/SoftFever/OrcaSlicer/releases/latest | grep "browser_download_url.*Linux_AppImage" | cut -d '"' -f 4)
 wget "$LATEST_RELEASE" -O /usr/local/bin/OrcaSlicer.AppImage
 chmod +x /usr/local/bin/OrcaSlicer.AppImage
+
+echo "Welche Java-Version(en) möchtest du installieren? (z.B. 8 11 17 21) Eingabe mit Leerzeichen getrennt:"
+read -r JAVA_VERSIONS
+
+for VERSION in $JAVA_VERSIONS; do
+    echo "Installiere Java $VERSION..."
+    yay -S --noconfirm "jdk${VERSION}-openjdk"
+done
+
+# Setze Standard-Java-Version (optional)
+echo "Möchtest du eine dieser Versionen als Standard festlegen? (z.B. 17 / leer für keine)"
+read -r DEFAULT_JAVA
+if [[ -n "$DEFAULT_JAVA" ]]; then
+    archlinux-java set "java-${DEFAULT_JAVA}-openjdk"
+    echo "Standard-Java auf Version $DEFAULT_JAVA gesetzt."
+fi
 
 # Erstelle Verzeichnis für Spiele
 echo "Erstelle /mnt/games Verzeichnis..."
