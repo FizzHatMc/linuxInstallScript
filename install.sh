@@ -6,6 +6,14 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+pacman -S --needed base-devel git | while read -r line; do
+    echo "[PACMAN] $line"
+done
+
+log_file="/var/log/system_setup.log"
+exec > >(tee -a "$log_file") 2>&1
+echo "=== $(date) ==="
+
 # Paketlisten aktualisieren
 echo "Aktualisiere Paketlisten..."
 pacman -Syu --noconfirm
@@ -128,8 +136,10 @@ grep -qxF "XDG_SESSION_TYPE=wayland" /etc/environment || echo "XDG_SESSION_TYPE=
 # OrcaSlicer neueste Version herunterladen
 echo "Lade neueste OrcaSlicer-Version herunter..."
 LATEST_RELEASE=$(curl -s https://api.github.com/repos/SoftFever/OrcaSlicer/releases/latest | grep "browser_download_url.*Linux_AppImage" | cut -d '"' -f 4)
-wget "$LATEST_RELEASE" -O /usr/local/bin/OrcaSlicer.AppImage
-chmod +x /usr/local/bin/OrcaSlicer.AppImage
+install_dir="$HOME/.local/bin"
+mkdir -p "$install_dir"
+wget "$LATEST_RELEASE" -O "$install_dir/OrcaSlicer.AppImage"
+chmod +x "$install_dir/OrcaSlicer.AppImage"
 
 # Erstelle Verzeichnis für Spiele
 echo "Erstelle /mnt/games Verzeichnis..."
@@ -221,5 +231,9 @@ echo
 echo "🔄 Aktualisiere Mounts gemäß /etc/fstab..."
 mount -a && echo "✅ Alle ausgewählten Laufwerke wurden gemountet." || echo "⚠️  Fehler beim Mounten. Bitte /etc/fstab prüfen."
 
+cleanup() {
+    rm -rf /tmp/yay* /tmp/makepkg*
+}
+trap cleanup EXIT
 
 echo "Installation abgeschlossen!"
