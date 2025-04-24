@@ -51,9 +51,72 @@ else
 fi
 
 # Pakete installieren
-echo "Installiere gewünschte Programme..."
-yay -S --noconfirm protonpass-bin prismlauncher prusa-slicer discord steam protonvpn-gui firefox intellij-idea-ultimate-edition solaar
-pacman -S --noconfirm ntfs-3g
+
+echo "Welche Programme möchtest du installieren (durch Leerzeichen getrennt)?"
+read -r USER_PROGRAMS
+
+declare -a FINAL_SELECTIONS
+
+for prog in $USER_PROGRAMS; do
+    echo
+    echo "🔍 Suche nach '$prog' mit yay..."
+
+    # Ganze Ausgabe in Array, Zeile für Zeile
+    mapfile -t SEARCH_OUTPUT < <(yay -Ss "$prog")
+
+    # Ergebnisse sammeln
+    RESULTS=()
+    for ((i=0; i<${#SEARCH_OUTPUT[@]}-1; i++)); do
+        LINE="${SEARCH_OUTPUT[i]}"
+        NEXT_LINE="${SEARCH_OUTPUT[i+1]}"
+        if [[ "$LINE" == aur/* ]] && [[ "$NEXT_LINE" =~ ^\ + ]]; then
+            RESULTS+=("$LINE" "$NEXT_LINE")
+        fi
+    done
+
+    if [ ${#RESULTS[@]} -eq 0 ]; then
+        echo "❌ Keine Pakete für '$prog' gefunden."
+        continue
+    fi
+
+    echo "Ergebnisse für '$prog':"
+    COUNT=0
+    for ((i=0; i<${#RESULTS[@]}; i+=2)); do
+        PACKAGE_LINE="${RESULTS[i]}"
+        DESCRIPTION_LINE="${RESULTS[i+1]}"
+        echo "[$COUNT] $PACKAGE_LINE"
+        echo "     -> $DESCRIPTION_LINE"
+        ((COUNT++))
+    done
+
+    echo
+    echo "👉 Gib die Nummer des gewünschten Pakets ein (oder leer lassen zum Überspringen):"
+    read -r CHOICE
+
+    if [[ "$CHOICE" =~ ^[0-9]+$ ]]; then
+        INDEX=$((CHOICE * 2))
+        SELECTED_LINE="${RESULTS[INDEX]}"
+        SELECTED_PKG=$(echo "$SELECTED_LINE" | awk '{print $1}')
+        FINAL_SELECTIONS+=("$SELECTED_PKG")
+        echo "✅ Hinzugefügt: $SELECTED_PKG"
+    else
+        echo "⏭️  '$prog' übersprungen."
+    fi
+done
+
+if [ ${#FINAL_SELECTIONS[@]} -gt 0 ]; then
+    echo
+    echo "📦 Installiere ausgewählte Pakete:"
+    for pkg in "${FINAL_SELECTIONS[@]}"; do
+        echo " - $pkg"
+    done
+    yay -S --noconfirm "${FINAL_SELECTIONS[@]}"
+else
+    echo "🚫 Keine Pakete zur Installation ausgewählt."
+fi
+
+
+
 
 # Sicherstellen, dass Wayland genutzt wird
 echo "Setze Wayland als Standard..."
@@ -68,42 +131,95 @@ LATEST_RELEASE=$(curl -s https://api.github.com/repos/SoftFever/OrcaSlicer/relea
 wget "$LATEST_RELEASE" -O /usr/local/bin/OrcaSlicer.AppImage
 chmod +x /usr/local/bin/OrcaSlicer.AppImage
 
-echo "Welche Java-Version(en) möchtest du installieren? (z.B. 8 11 17 21) Eingabe mit Leerzeichen getrennt:"
-read -r JAVA_VERSIONS
-
-for VERSION in $JAVA_VERSIONS; do
-    echo "Installiere Java $VERSION..."
-    yay -S --noconfirm "jdk${VERSION}-openjdk"
-done
-
-# Setze Standard-Java-Version (optional)
-echo "Möchtest du eine dieser Versionen als Standard festlegen? (z.B. 17 / leer für keine)"
-read -r DEFAULT_JAVA
-if [[ -n "$DEFAULT_JAVA" ]]; then
-    archlinux-java set "java-${DEFAULT_JAVA}-openjdk"
-    echo "Standard-Java auf Version $DEFAULT_JAVA gesetzt."
-fi
-
 # Erstelle Verzeichnis für Spiele
 echo "Erstelle /mnt/games Verzeichnis..."
 mkdir -p /mnt/games
 
-# Überprüfe auf eine Partition mit dem Label "GamesSSD"
-echo "Suche nach Laufwerk mit dem Label 'GamesSSD'..."
-GAMES_UUID=$(blkid | grep 'LABEL="GamesSSD"' | grep -oP 'UUID="\K[^"]+')
+#!/bin/bash
 
-if [[ -n "$GAMES_UUID" ]]; then
-    echo "Gefundene UUID: $GAMES_UUID"
+# Alle verfügbaren Partitionen anzeigen
+echo "🔍 Erkenne angeschlossene Partitionen..."
+mapfile -t DRIVES < <(blkid -o device)
 
-    # Prüfe, ob Eintrag bereits in /etc/fstab vorhanden ist
-    if ! grep -q "$GAMES_UUID" /etc/fstab; then
-        echo "Füge Eintrag zu /etc/fstab hinzu..."
-        echo "UUID=$GAMES_UUID /mnt/games ntfs-3g defaults,uid=1000,gid=1000 0 2" >> /etc/fstab
-    else
-        echo "Eintrag bereits in /etc/fstab vorhanden."
-    fi
-else
-    echo "Kein Laufwerk mit dem Label 'GamesSSD' gefunden."
+if [ ${#DRIVES[@]} -eq 0 ]; then
+    echo "❌ Keine Laufwerke erkannt."
+    exit 1
 fi
+
+echo "Gefundene Partitionen:"
+for i in "${!DRIVES[@]}"; do
+    DEVICE="${DRIVES[$i]}"
+    INFO=$(blkid -o export "$DEVICE")
+    echo "[$i] $DEVICE"
+    echo "$INFO" | sed 's/^/    /'
+    echo
+done
+
+# Auswahl durch den Nutzer
+echo
+echo "Welche Partitionen sollen automatisch gemountet werden? (Mehrfachauswahl z. B. '0 2 3')"
+read -r DRIVE_SELECTION
+
+for index in $DRIVE_SELECTION; do
+    DEVICE="${DRIVES[$index]}"
+    INFO=$(blkid -o export "$DEVICE")
+
+    # Extrahieren der Informationen
+    UUID=$(echo "$INFO" | grep -oP '^UUID=\K.*')
+    FS_TYPE=$(echo "$INFO" | grep -oP '^TYPE=\K.*')
+    LABEL=$(echo "$INFO" | grep -oP '^LABEL=\K.*')
+
+    # Sicherstellen, dass UUID und Dateisystemtyp vorhanden sind
+    if [ -z "$UUID" ] || [ -z "$FS_TYPE" ]; then
+        echo "❌ Fehler: UUID oder Dateisystemtyp konnte nicht extrahiert werden. Überspringe Partition $DEVICE."
+        continue
+    fi
+
+    # Wenn kein Label vorhanden, benutzerdefinierten Namen vergeben
+    if [ -z "$LABEL" ]; then
+        echo "Kein Label gefunden für UUID=$UUID."
+        echo "Gib einen Namen für das Mount-Verzeichnis ein (z. B. 'Datenplatte'):"
+        read -r LABEL
+    fi
+
+    # Pfadwahl
+    echo "Möchtest du ein benutzerdefiniertes Verzeichnis zum Mounten angeben für '$LABEL'? (j/n)"
+    read -r CUSTOM_PATH_CHOICE
+
+    if [[ "$CUSTOM_PATH_CHOICE" == "j" ]]; then
+        echo "Gib den vollständigen Mount-Pfad an (z. B. '/media/games'):"
+        read -r MOUNT_POINT
+    else
+        MOUNT_POINT="/mnt/$LABEL"
+    fi
+
+    mkdir -p "$MOUNT_POINT"
+
+    # Standardmäßige Optionen annehmen
+    if [[ "$FS_TYPE" == "ntfs" || "$FS_TYPE" == "ntfs-3g" ]]; then
+        OPTIONS="defaults,uid=1000,gid=1000 0 2"
+    elif [[ "$FS_TYPE" == "ext4" ]]; then
+        OPTIONS="defaults 0 2"
+    elif [[ "$FS_TYPE" == "vfat" ]]; then
+        OPTIONS="defaults,umask=0002,utf8=true 0 0"
+    else
+        OPTIONS="defaults 0 2"
+    fi
+
+    # Prüfen, ob bereits vorhanden
+    if grep -q "$UUID" /etc/fstab; then
+        echo "⚠️  Eintrag für UUID=$UUID ist bereits in /etc/fstab vorhanden - überspringe."
+    else
+        echo "🔧 Füge Mountpoint hinzu: UUID=$UUID -> $MOUNT_POINT"
+        # Füge den Eintrag in /etc/fstab hinzu (korrekt formatiert in einer Zeile)
+        echo "UUID=$UUID $MOUNT_POINT $FS_TYPE $OPTIONS" | tee -a /etc/fstab > /dev/null
+    fi
+done
+
+# Mount alle fstab-Einträge
+echo
+echo "🔄 Aktualisiere Mounts gemäß /etc/fstab..."
+mount -a && echo "✅ Alle ausgewählten Laufwerke wurden gemountet." || echo "⚠️  Fehler beim Mounten. Bitte /etc/fstab prüfen."
+
 
 echo "Installation abgeschlossen!"
