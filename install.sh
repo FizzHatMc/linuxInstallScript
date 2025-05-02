@@ -236,4 +236,130 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# === 🎮 GameSink Virtual Audio Output ===
+echo
+echo "🎧 Möchtest du eine virtuelle Audio-Ausgabe (GameSink) einrichten und automatisch verbinden? (y/n)"
+read -r GAMESINK_CHOICE
+
+if [[ "$GAMESINK_CHOICE" == "y" ]]; then
+    echo "🔧 Richte GameSink ein..."
+
+    # Verzeichnisse anlegen
+    GAMESINK_SCRIPT_DIR="/home/$SUDO_USER/.config/pipewire/scripts"
+    SYSTEMD_USER_DIR="/home/$SUDO_USER/.config/systemd/user"
+    WIREPLUMBER_DIR="/home/$SUDO_USER/.config/wireplumber/main.lua.d"
+
+    mkdir -p "$GAMESINK_SCRIPT_DIR" "$SYSTEMD_USER_DIR" "$WIREPLUMBER_DIR"
+
+    # GameSink loopback-Skript
+    cat > "$GAMESINK_SCRIPT_DIR/create-gamesink.sh" <<EOF
+#!/bin/bash
+pw-loopback --capture-props='node.name="GameSink"' --playback-props='media.class=Audio/Sink' --node-name=GameSink --target=auto_null.monitor &
+EOF
+    chmod +x "$GAMESINK_SCRIPT_DIR/create-gamesink.sh"
+
+    # systemd-Dienst für GameSink
+    cat > "$SYSTEMD_USER_DIR/game-sink.service" <<EOF
+[Unit]
+Description=Create GameSink virtual audio output
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+ExecStart=$GAMESINK_SCRIPT_DIR/create-gamesink.sh
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+    # Liste aktueller Sinks für automatische Verbindung
+    echo
+    echo "🔊 Verfügbare Audio-Ausgaben:"
+    AVAILABLE_OUTPUTS=$(runuser -u "$SUDO_USER" -- pw-cli ls Node | grep -E '^\s+name = "' | cut -d'"' -f2 | grep -v 'GameSink' | nl)
+    if [ -z "$AVAILABLE_OUTPUTS" ]; then
+        echo "⚠️  Keine verfügbaren Audio-Sinks gefunden!"
+    else
+        echo "$AVAILABLE_OUTPUTS"
+        echo
+        echo "👉 Gib die Nummer der Ausgabe ein, mit der GameSink automatisch verbunden werden soll:"
+        read -r SINK_CHOICE_NUM
+        SELECTED_SINK=$(echo "$AVAILABLE_OUTPUTS" | sed -n "${SINK_CHOICE_NUM}p" | cut -f2)
+
+        if [ -n "$SELECTED_SINK" ]; then
+            echo "🎯 Gewählter Sink: $SELECTED_SINK"
+
+            # Auto-connect Skript
+            cat > "$GAMESINK_SCRIPT_DIR/auto-connect-monitors.sh" <<EOF
+#!/bin/bash
+set -e
+
+# Warten auf GameSink Monitor
+for i in {1..20}; do
+  MONITOR=\$(pw-cli ls Port | grep -B1 "node.name = \\"GameSink\\.*monitor.*" | grep "id =" | awk '{print \$3}')
+  TARGETS=(\$(pw-cli ls Port | grep -B1 "node.name = \\"$SELECTED_SINK\\".*input.*" | grep "id =" | awk '{print \$3}'))
+
+  if [ -n "\$MONITOR" ] && [ \${#TARGETS[@]} -gt 0 ]; then
+    for TARGET in "\${TARGETS[@]}"; do
+      pw-link "\$MONITOR" "\$TARGET" || echo "⚠️ Verbindung fehlgeschlagen"
+    done
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "❌ Konnte Monitor nicht automatisch verbinden"
+exit 255
+EOF
+            chmod +x "$GAMESINK_SCRIPT_DIR/auto-connect-monitors.sh"
+
+            # systemd-Dienst zum Verbinden
+            cat > "$SYSTEMD_USER_DIR/pw-monitor-links.service" <<EOF
+[Unit]
+Description=Auto-connect GameSink monitor ports to outputs
+After=pipewire.service game-sink.service
+Requires=pipewire.service game-sink.service
+
+[Service]
+ExecStart=$GAMESINK_SCRIPT_DIR/auto-connect-monitors.sh
+Type=simple
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+            # WirePlumber: Standard-Sink setzen
+            cat > "$WIREPLUMBER_DIR/99-default-sink.lua" <<EOF
+default_nodes = {
+  ["default.audio.sink"] = "GameSink",
+}
+for k, v in pairs(default_nodes) do
+  node = Session:get_node_by_name(v)
+  if node then
+    Session:set_default_node(k, node)
+  else
+    print("Node not found:", v)
+  end
+end
+EOF
+
+            # Berechtigungen setzen
+            chown -R "$SUDO_USER":"$SUDO_USER" "/home/$SUDO_USER/.config"
+
+            # Dienste aktivieren
+            runuser -u "$SUDO_USER" -- systemctl --user daemon-reexec
+            runuser -u "$SUDO_USER" -- systemctl --user enable --now game-sink.service
+            runuser -u "$SUDO_USER" -- systemctl --user enable --now pw-monitor-links.service
+
+            echo "✅ GameSink wurde erstellt, verbunden und als Standard gesetzt."
+        else
+            echo "⚠️  Ungültige Auswahl, Verbindung wird übersprungen."
+        fi
+    fi
+else
+    echo "⏭️  GameSink wird nicht eingerichtet."
+fi
+
+
 echo "Installation abgeschlossen!"
