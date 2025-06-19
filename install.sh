@@ -14,6 +14,8 @@ show_menu() {
     echo "[6] Configure Automatic Mounts"
     echo "[7] Setup GameSink Virtual Audio"
     echo "[8] Run Full Setup (All Options)"
+    echo "[9] Create GameSink standalone"
+    echo "[a] Create auto connection for Audio Game Sink"
     echo "[X] Exit"
     echo
     echo -n "Please select an option (1-8 or X): "
@@ -243,83 +245,152 @@ configure_mounts() {
     mount -a && echo "✅ Alle ausgewählten Laufwerke wurden gemountet." || echo "⚠️  Fehler beim Mounten. Bitte /etc/fstab prüfen."
 }
 
-# Function to setup GameSink virtual audio
+# Function to create virtual GameSink
+create_gamesink() {
+    echo "🎧 Creating virtual audio sink..."
+    SINK_NAME="GameSink"
+    SINK_DESCRIPTION="GameAudio"
+
+    # Create the null sink
+    pactl load-module module-null-sink sink_name="$SINK_NAME" sink_properties=device.description="$SINK_DESCRIPTION"
+    pactl set-default-sink "$SINK_NAME"
+
+    echo "✅ Virtual sink '$SINK_NAME' created and set as default"
+}
+
+# Function to auto-connect audio devices to GameSink
+# Function to auto-connect audio devices to GameSink
+connect_to_gamesink() {
+    SINK_NAME="GameSink"
+
+    echo "🔍 Checking audio service status..."
+
+    # First ensure pipewire/pulseaudio is running
+    if ! pactl info &>/dev/null; then
+        echo "⚠️ Audio service not running - attempting to start..."
+        systemctl --user start pipewire pipewire-pulse
+        sleep 2  # Give it time to start
+
+        if ! pactl info &>/dev/null; then
+            echo "❌ Failed to start audio service - cannot connect devices"
+            return 1
+        fi
+    fi
+
+    echo "✅ Audio service is running"
+    echo ""
+    echo "Available audio output sinks:"
+
+    mapfile -t sinks < <(pactl list short sinks | grep -v "$SINK_NAME" | awk '{print $2}')
+
+    if [ ${#sinks[@]} -eq 0 ]; then
+        echo "❌ No available audio sinks found (except GameSink)"
+        return 1
+    fi
+
+    # Display available sinks with numbers
+    for i in "${!sinks[@]}"; do
+        echo "[$((i+1))] ${sinks[$i]}"
+    done
+
+    echo ""
+    while true; do
+        read -p "👉 Enter the numbers of sinks to connect (e.g. '1 3') or 'q' to quit: " -a selected_indices
+
+        if [[ "${selected_indices[0]}" == "q" ]]; then
+            echo "⏭️ Skipping connection"
+            return 0
+        fi
+
+        # Validate input
+        valid=true
+        for i in "${selected_indices[@]}"; do
+            if ! [[ "$i" =~ ^[0-9]+$ ]] || [ "$i" -lt 1 ] || [ "$i" -gt "${#sinks[@]}" ]; then
+                echo "❌ Invalid selection: $i"
+                valid=false
+                break
+            fi
+        done
+
+        if $valid; then
+            break
+        fi
+    done
+
+    # Map selected numbers back to sink names
+    selected_sinks=()
+    for i in "${selected_indices[@]}"; do
+        idx=$((i-1))
+        selected_sinks+=("${sinks[$idx]}")
+    done
+
+    # Connect each selected sink
+    echo ""
+    echo "🔗 Connecting to: ${selected_sinks[*]}"
+    for sink in "${selected_sinks[@]}"; do
+        echo " - Connecting $SINK_NAME to $sink"
+        pw-link "${SINK_NAME}:monitor_FL" "${sink}:playback_FL"
+        pw-link "${SINK_NAME}:monitor_FR" "${sink}:playback_FR"
+    done
+
+    echo "✅ Successfully connected GameSink to selected devices"
+}
+
+# Function to setup GameSink with systemd service
 setup_gamesink() {
     echo
-    echo "🎧 Möchtest du eine virtuelle Audio-Ausgabe (GameSink) einrichten und automatisch verbinden? (y/n)"
+    echo "🎧 Would you like to set up GameSink virtual audio? (y/n)"
     read -r GAMESINK_CHOICE
 
     if [[ "$GAMESINK_CHOICE" == "y" ]]; then
+        SERVICE_NAME="virtual-sink"
+        SINK_NAME="GameSink"
+        SERVICE_FILE="$HOME/.config/systemd/user/$SERVICE_NAME.service"
 
-SERVICE_NAME="virtual-sink"
-SINK_NAME="GameSink"
-SINK_DESCRIPTION="GameAudio"
-SERVICE_FILE="$HOME/.config/systemd/user/$SERVICE_NAME.service"
+        # Create the GameSink first
+        create_gamesink
 
-# Get all available real sinks
-echo "🔍 Available audio output sinks:"
-mapfile -t sinks < <(pactl list short sinks | awk '{print $2}')
+        # Then connect selected devices
+        connect_to_gamesink
 
-for i in "${!sinks[@]}"; do
-    echo "[$((i+1))] ${sinks[$i]}"
-done
+        # Create systemd service to persist these settings
+        mkdir -p "$HOME/.config/systemd/user"
 
-echo ""
-read -p "👉 Enter the numbers of the sinks you want GameSink to auto-bind to (e.g. 1 3): " -a selected_indices
+        # Get the current connections to persist them
+        current_connections=$(pactl list short sinks | grep "$SINK_NAME")
+        link_commands=""
+        while read -r line; do
+            sink_id=$(echo "$line" | awk '{print $1}')
+            sink_name=$(echo "$line" | awk '{print $2}')
+            if [[ "$sink_name" != "$SINK_NAME" ]]; then
+                link_commands+="pw-link ${SINK_NAME}:monitor_FL ${sink_name}:playback_FL\n"
+                link_commands+="pw-link ${SINK_NAME}:monitor_FR ${sink_name}:playback_FR\n"
+            fi
+        done <<< "$current_connections"
 
-# Map selected numbers back to sink names
-selected_sinks=()
-for i in "${selected_indices[@]}"; do
-    idx=$((i-1))
-    if [[ -n "${sinks[$idx]}" ]]; then
-        selected_sinks+=("${sinks[$idx]}")
-    fi
-done
-
-# Build pw-link commands to connect GameSink monitor to selected sinks
-link_commands=""
-for sink in "${selected_sinks[@]}"; do
-    link_commands+="pw-link ${SINK_NAME}:monitor_FL ${sink}:playback_FL\n"
-    link_commands+="pw-link ${SINK_NAME}:monitor_FR ${sink}:playback_FR\n"
-done
-
-echo -e "🔗 These connections will be made:\n$link_commands"
-
-mkdir -p "$HOME/.config/systemd/user"
-
-# Generate the systemd service
-cat > "$SERVICE_FILE" <<EOF
+        cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Create virtual audio sink and set as default
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '/usr/bin/pactl load-module module-null-sink sink_name=$SINK_NAME sink_properties=device.description=$SINK_DESCRIPTION; sleep 1; /usr/bin/pactl set-default-sink $SINK_NAME; sleep 1; ${link_commands//\\n/;}'
+ExecStart=/bin/bash -c '/usr/bin/pactl load-module module-null-sink sink_name=$SINK_NAME sink_properties=device.description=GameAudio; sleep 1; /usr/bin/pactl set-default-sink $SINK_NAME; sleep 1; ${link_commands//\\n/;}'
 RemainAfterExit=true
 
 [Install]
 WantedBy=default.target
 EOF
 
-echo "✅ Service file created at: $SERVICE_FILE"
+        echo "🔄 Reloading systemd user daemon..."
+        systemctl --user daemon-reexec
+        systemctl --user daemon-reload
 
-echo "🔄 Reloading systemd user daemon..."
-systemctl --user daemon-reexec
-systemctl --user daemon-reload
+        echo "📌 Enabling and starting the service..."
+        systemctl --user enable --now "$SERVICE_NAME.service"
 
-echo "📌 Enabling and starting the service..."
-systemctl --user enable --now "$SERVICE_NAME.service"
-
-    echo "✅ Done. GameSink is now default and auto-connected to selected sinks."
-
-
-                echo "✅ GameSink wurde erstellt, verbunden und als Standard gesetzt."
-            else
-                echo "⚠️  Ungültige Auswahl, Verbindung wird übersprungen."
-            fi
-        fi
+        echo "✅ GameSink setup complete with persistent connections"
     else
-        echo "⏭️  GameSink wird nicht eingerichtet."
+        echo "⏭️ Skipping GameSink setup"
     fi
 }
 
@@ -337,10 +408,10 @@ run_full_setup() {
 }
 
 # Main script execution
-if [ "$EUID" -ne 0 ]; then
-    echo "Bitte starte das Skript mit sudo: sudo $0"
-    exit 1
-fi
+#if [ "$EUID" -ne 0 ]; then
+#    echo "Bitte starte das Skript mit sudo: sudo $0"
+#    exit 1
+#fi
 
 # Initialize logging
 log_file="/var/log/system_setup.log"
@@ -369,6 +440,8 @@ while true; do
         6) configure_mounts ;;
         7) setup_gamesink ;;
         8) run_full_setup ;;
+        9) create_gamesink ;;
+        a) connect_to_gamesink ;;
         [xX]) echo "Beende Skript..."; exit 0 ;;
         *) echo "Ungültige Option. Bitte versuche es erneut." ;;
     esac
