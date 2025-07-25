@@ -3,7 +3,7 @@
 # Function to display the main menu
 show_menu() {
     clear
-    echo " ======================================"
+    echo "======================================"
     echo "         Arch Linux Setup Menu        "
     echo "======================================"
     echo "[1] Install GPU Drivers"
